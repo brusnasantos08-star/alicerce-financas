@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import {
-  Upload, X, Plus, Check, Trash2, Pencil, AlertCircle, Loader2,
+  Upload, X, Plus, Check, Trash2, Pencil, AlertCircle, Loader2, Settings,
   Home, Building2, Zap, Wifi, UtensilsCrossed, Tv, Car, Heart,
   Dumbbell, GraduationCap, Smartphone, ShoppingCart, Landmark, Wallet,
 } from 'lucide-react';
@@ -18,15 +18,23 @@ const ICON_LIBRARY = {
 };
 const ICON_KEYS = Object.keys(ICON_LIBRARY);
 
-const DEFAULT_FIXED = [
+// Espaços disponíveis: conta conjunta do casal + uma área pessoal para cada pessoa
+const SPACES = ['joint', 'p1', 'p2'];
+
+const DEFAULT_FIXED_JOINT = [
   { id: 'fx-aluguel', name: 'Aluguel', amount: 1500, icon: 'Home' },
   { id: 'fx-streaming', name: 'Streamings', amount: 60, icon: 'Tv' },
   { id: 'fx-luz', name: 'Luz', amount: 180, icon: 'Zap' },
   { id: 'fx-internet', name: 'Internet', amount: 100, icon: 'Wifi' },
   { id: 'fx-alimentacao', name: 'Alimentação', amount: 600, icon: 'UtensilsCrossed' },
 ];
+// Gastos fixos agora são um objeto por espaço: joint (casa) / p1 / p2 (pessoais)
+const DEFAULT_FIXED_TEMPLATES = { joint: DEFAULT_FIXED_JOINT, p1: [], p2: [] };
 
 const DEFAULT_INVESTMENTS = { balance: 0, goalName: 'Entrada do apartamento', goalAmount: 50000, contributions: {} };
+
+// Nomes exibidos nas abas pessoais — editáveis pelo ícone de engrenagem no app
+const DEFAULT_SETTINGS = { p1Name: 'Pessoa 1', p2Name: 'Pessoa 2' };
 
 function brl(v) {
   const n = Number(v) || 0;
@@ -41,6 +49,17 @@ function uid() {
 function parseAmount(raw) {
   return Number(String(raw).replace(',', '.'));
 }
+// Aceita tanto o formato antigo (array simples) quanto o novo (objeto por espaço),
+// pra não quebrar caso o código novo suba antes da migração do banco (ou vice-versa).
+function normalizeFixedTemplates(raw) {
+  if (Array.isArray(raw)) {
+    return { joint: raw, p1: [], p2: [] };
+  }
+  if (raw && typeof raw === 'object') {
+    return { joint: raw.joint || [], p1: raw.p1 || [], p2: raw.p2 || [] };
+  }
+  return { joint: [], p1: [], p2: [] };
+}
 
 export default function App() {
   const now = new Date();
@@ -48,17 +67,20 @@ export default function App() {
 
   const [selectedMonthIdx, setSelectedMonthIdx] = useState(now.getMonth());
   const [activeTab, setActiveTab] = useState('lancamentos');
+  const [space, setSpace] = useState('joint');
   const [loading, setLoading] = useState(true);
   const [saveError, setSaveError] = useState(null);
 
-  const [fixedTemplates, setFixedTemplates] = useState(DEFAULT_FIXED);
+  const [fixedTemplates, setFixedTemplates] = useState(DEFAULT_FIXED_TEMPLATES);
   const [paidStatus, setPaidStatus] = useState({});
   const [transactions, setTransactions] = useState({});
   const [investments, setInvestments] = useState(DEFAULT_INVESTMENTS);
+  const [settings, setSettings] = useState(DEFAULT_SETTINGS);
 
   const [showSummary, setShowSummary] = useState(false);
   const [showTxModal, setShowTxModal] = useState(false);
   const [showFixedModal, setShowFixedModal] = useState(false);
+  const [showNamesModal, setShowNamesModal] = useState(false);
   const [editingFixed, setEditingFixed] = useState(null);
   const [lightboxImage, setLightboxImage] = useState(null);
 
@@ -71,6 +93,7 @@ export default function App() {
       grouped[t.month_key] = grouped[t.month_key] || [];
       grouped[t.month_key].push({
         id: t.id, amount: Number(t.amount), description: t.description, date: t.date, image: t.image_url,
+        space: t.space || 'joint',
       });
     });
     setTransactions(grouped);
@@ -86,15 +109,22 @@ export default function App() {
         if (!data) {
           const { data: inserted } = await supabase
             .from('app_state')
-            .insert({ id: 1, fixed_templates: DEFAULT_FIXED, paid_status: {}, investments: DEFAULT_INVESTMENTS })
+            .insert({
+              id: 1,
+              fixed_templates: DEFAULT_FIXED_TEMPLATES,
+              paid_status: {},
+              investments: DEFAULT_INVESTMENTS,
+              settings: DEFAULT_SETTINGS,
+            })
             .select()
             .single();
           data = inserted;
         }
         if (!cancelled && data) {
-          setFixedTemplates(data.fixed_templates || DEFAULT_FIXED);
+          setFixedTemplates(normalizeFixedTemplates(data.fixed_templates));
           setPaidStatus(data.paid_status || {});
           setInvestments(data.investments || DEFAULT_INVESTMENTS);
+          setSettings(data.settings || DEFAULT_SETTINGS);
         }
         await loadTransactions();
       } catch (err) {
@@ -116,16 +146,17 @@ export default function App() {
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'app_state' }, (payload) => {
         if (payload.new) {
-          setFixedTemplates(payload.new.fixed_templates || DEFAULT_FIXED);
+          setFixedTemplates(normalizeFixedTemplates(payload.new.fixed_templates));
           setPaidStatus(payload.new.paid_status || {});
           setInvestments(payload.new.investments || DEFAULT_INVESTMENTS);
+          setSettings(payload.new.settings || DEFAULT_SETTINGS);
         }
       })
       .subscribe();
     return () => { supabase.removeChannel(channel); };
   }, []);
 
-  // Salva gastos fixos / status de pagamento / investimentos no Supabase a cada alteração
+  // Salva gastos fixos / status de pagamento / investimentos / nomes no Supabase a cada alteração
   useEffect(() => {
     if (loading || !supabase) return;
     (async () => {
@@ -135,27 +166,30 @@ export default function App() {
           fixed_templates: fixedTemplates,
           paid_status: paidStatus,
           investments,
+          settings,
           updated_at: new Date().toISOString(),
         })
         .eq('id', 1);
       setSaveError(error ? 'Não foi possível salvar suas alterações agora.' : null);
     })();
-  }, [fixedTemplates, paidStatus, investments, loading]);
+  }, [fixedTemplates, paidStatus, investments, settings, loading]);
 
   const mk = monthKey(year, selectedMonthIdx);
-  const fixedTotal = fixedTemplates.reduce((s, f) => s + (Number(f.amount) || 0), 0);
-  const fixedPaidTotal = fixedTemplates.reduce(
+  const currentFixed = fixedTemplates[space] || [];
+  const fixedTotal = currentFixed.reduce((s, f) => s + (Number(f.amount) || 0), 0);
+  const fixedPaidTotal = currentFixed.reduce(
     (s, f) => s + (((paidStatus[mk] || {})[f.id]) ? (Number(f.amount) || 0) : 0),
     0
   );
   const fixedPendingTotal = fixedTotal - fixedPaidTotal;
-  const monthTransactions = transactions[mk] || [];
+  const monthTransactions = (transactions[mk] || []).filter((t) => t.space === space);
   const variableTotal = monthTransactions.reduce((s, t) => s + (Number(t.amount) || 0), 0);
   const contribution = (investments.contributions || {})[mk] || 0;
 
   function hasData(idx) {
     const k = monthKey(year, idx);
-    return (transactions[k] && transactions[k].length > 0) || !!(investments.contributions || {})[k];
+    const hasSpaceTx = (transactions[k] || []).some((t) => t.space === space);
+    return hasSpaceTx || !!(investments.contributions || {})[k];
   }
 
   async function handleAddTransaction(tx, file) {
@@ -168,7 +202,7 @@ export default function App() {
       imageUrl = urlData.publicUrl;
     }
     const { error } = await supabase.from('transactions').insert({
-      month_key: mk, amount: tx.amount, description: tx.description, date: tx.date, image_url: imageUrl,
+      month_key: mk, amount: tx.amount, description: tx.description, date: tx.date, image_url: imageUrl, space,
     });
     if (error) { setSaveError('Não foi possível salvar o lançamento.'); return; }
     setShowTxModal(false);
@@ -190,6 +224,14 @@ export default function App() {
       ) : (
         <>
           <Header balance={investments.balance} />
+
+          <SpaceSwitcher
+            space={space}
+            onChange={setSpace}
+            p1Name={settings.p1Name}
+            p2Name={settings.p2Name}
+            onOpenSettings={() => setShowNamesModal(true)}
+          />
 
           <MonthStrip
             selectedIdx={selectedMonthIdx}
@@ -216,7 +258,7 @@ export default function App() {
 
             {activeTab === 'fixos' && (
               <FixedExpensesTab
-                items={fixedTemplates}
+                items={currentFixed}
                 paid={paidStatus[mk] || {}}
                 onToggle={(id) =>
                   setPaidStatus((prev) => ({
@@ -227,7 +269,7 @@ export default function App() {
                 onAdd={() => { setEditingFixed(null); setShowFixedModal(true); }}
                 onEdit={(f) => { setEditingFixed(f); setShowFixedModal(true); }}
                 onDelete={(id) => {
-                  setFixedTemplates((prev) => prev.filter((f) => f.id !== id));
+                  setFixedTemplates((prev) => ({ ...prev, [space]: prev[space].filter((f) => f.id !== id) }));
                   setPaidStatus((prev) => {
                     const next = {};
                     Object.keys(prev).forEach((k) => {
@@ -277,12 +319,24 @@ export default function App() {
               onClose={() => setShowFixedModal(false)}
               onSave={(data) => {
                 if (editingFixed) {
-                  setFixedTemplates((prev) => prev.map((f) => (f.id === editingFixed.id ? { ...f, ...data } : f)));
+                  setFixedTemplates((prev) => ({
+                    ...prev,
+                    [space]: prev[space].map((f) => (f.id === editingFixed.id ? { ...f, ...data } : f)),
+                  }));
                 } else {
-                  setFixedTemplates((prev) => [...prev, { ...data, id: uid() }]);
+                  setFixedTemplates((prev) => ({ ...prev, [space]: [...prev[space], { ...data, id: uid() }] }));
                 }
                 setShowFixedModal(false);
               }}
+            />
+          )}
+
+          {showNamesModal && (
+            <NamesModal
+              p1Name={settings.p1Name}
+              p2Name={settings.p2Name}
+              onClose={() => setShowNamesModal(false)}
+              onSave={(p1Name, p2Name) => setSettings({ p1Name, p2Name })}
             />
           )}
 
@@ -333,6 +387,82 @@ function Header({ balance }) {
         </div>
       </div>
     </header>
+  );
+}
+
+// Seletor de espaço: conta conjunta do casal, ou a área pessoal de cada uma.
+// Filtra Lançamentos e Gastos Fixos; Investimentos continua sempre conjunto.
+function SpaceSwitcher({ space, onChange, p1Name, p2Name, onOpenSettings }) {
+  const spaces = [
+    { id: 'joint', label: 'Conjunta' },
+    { id: 'p1', label: p1Name },
+    { id: 'p2', label: p2Name },
+  ];
+  return (
+    <div className="border-b border-slate-200 bg-white">
+      <div className="mx-auto flex max-w-3xl items-center gap-2 px-4 py-3 sm:px-6">
+        <div className="flex flex-1 gap-1.5">
+          {spaces.map((s) => (
+            <button
+              key={s.id}
+              onClick={() => onChange(s.id)}
+              className={`flex-1 truncate rounded-lg px-3 py-2 text-sm font-medium transition-colors ${
+                space === s.id ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-500 hover:bg-slate-200 hover:text-slate-700'
+              }`}
+            >
+              {s.label}
+            </button>
+          ))}
+        </div>
+        <button
+          onClick={onOpenSettings}
+          aria-label="Editar nomes das abas pessoais"
+          className="shrink-0 rounded-full p-2 text-slate-400 hover:bg-slate-100 hover:text-slate-600"
+        >
+          <Settings className="h-4 w-4" />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function NamesModal({ p1Name, p2Name, onClose, onSave }) {
+  const [n1, setN1] = useState(p1Name);
+  const [n2, setN2] = useState(p2Name);
+  return (
+    <Modal title="Nomes das abas pessoais" onClose={onClose}>
+      <div className="space-y-4">
+        <div>
+          <label className="mb-1.5 block text-sm text-slate-600">Nome da pessoa 1</label>
+          <input
+            value={n1}
+            onChange={(e) => setN1(e.target.value)}
+            placeholder="Pessoa 1"
+            className="w-full rounded-lg border border-slate-300 px-3 py-2 outline-none focus:border-slate-500"
+          />
+        </div>
+        <div>
+          <label className="mb-1.5 block text-sm text-slate-600">Nome da pessoa 2</label>
+          <input
+            value={n2}
+            onChange={(e) => setN2(e.target.value)}
+            placeholder="Pessoa 2"
+            className="w-full rounded-lg border border-slate-300 px-3 py-2 outline-none focus:border-slate-500"
+          />
+        </div>
+        <div className="flex gap-3 pt-2">
+          <button onClick={onClose} className="flex-1 rounded-lg border border-slate-300 py-2.5 text-sm font-medium text-slate-600 hover:bg-slate-50">
+            Cancelar
+          </button>
+          <button
+            onClick={() => { onSave(n1.trim() || 'Pessoa 1', n2.trim() || 'Pessoa 2'); onClose(); }}
+            className="flex-1 rounded-lg bg-slate-900 py-2.5 text-sm font-medium text-white hover:bg-slate-800"
+          >
+            Salvar
+          </button>
+        </div>
+      </div>
+    </Modal>
   );
 }
 
