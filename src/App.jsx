@@ -153,6 +153,12 @@ export default function App() {
   const [editingFixed, setEditingFixed] = useState(null);
   const [lightboxImage, setLightboxImage] = useState(null);
 
+  // Marca quando fixedTemplates/paidStatus/investments/settings acabaram de chegar
+  // do tempo real (em vez de terem sido editados aqui), pra não reenviar de volta
+  // pro Supabase o mesmo dado que ele acabou de nos mandar — é isso que causava o
+  // loop de salvar/ecoar/salvar (checkbox piscando, item excluído voltando).
+  const isRemoteUpdate = useRef(false);
+
   async function loadTransactions() {
     if (!supabase) return;
     const { data, error } = await supabase.from('transactions').select('*').order('date', { ascending: false });
@@ -215,6 +221,7 @@ export default function App() {
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'app_state' }, (payload) => {
         if (payload.new) {
+          isRemoteUpdate.current = true;
           setFixedTemplates(normalizeFixedTemplates(payload.new.fixed_templates));
           setPaidStatus(normalizePaidStatus(payload.new.paid_status));
           setInvestments(normalizeInvestments(payload.new.investments));
@@ -228,6 +235,12 @@ export default function App() {
   // Salva gastos fixos / status de pagamento / investimentos / nomes no Supabase a cada alteração
   useEffect(() => {
     if (loading || !supabase) return;
+    if (isRemoteUpdate.current) {
+      // Esse estado chegou do tempo real (nosso ou do outro celular) — só aplicar
+      // localmente, não reenviar pro banco, senão vira um eco infinito.
+      isRemoteUpdate.current = false;
+      return;
+    }
     (async () => {
       const { error } = await supabase
         .from('app_state')
