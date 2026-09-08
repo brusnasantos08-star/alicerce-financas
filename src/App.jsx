@@ -88,6 +88,26 @@ function blobToBase64(blob) {
   });
 }
 
+// Garante que os dados vindos do Supabase sempre tenham o formato que o app espera,
+// mesmo que a linha já existisse com outro formato (ex: criada por outra versão do app).
+function normalizeFixedTemplates(value) {
+  return Array.isArray(value) ? value : DEFAULT_FIXED;
+}
+function normalizePaidStatus(value) {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+}
+function normalizeInvestments(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return DEFAULT_INVESTMENTS;
+  return {
+    balance: Number(value.balance) || 0,
+    goalName: typeof value.goalName === 'string' && value.goalName ? value.goalName : DEFAULT_INVESTMENTS.goalName,
+    goalAmount: Number(value.goalAmount) || DEFAULT_INVESTMENTS.goalAmount,
+    contributions: value.contributions && typeof value.contributions === 'object' && !Array.isArray(value.contributions)
+      ? value.contributions
+      : {},
+  };
+}
+
 export default function App() {
   const now = new Date();
   const year = now.getFullYear();
@@ -138,9 +158,9 @@ export default function App() {
           data = inserted;
         }
         if (!cancelled && data) {
-          setFixedTemplates(data.fixed_templates || DEFAULT_FIXED);
-          setPaidStatus(data.paid_status || {});
-          setInvestments(data.investments || DEFAULT_INVESTMENTS);
+          setFixedTemplates(normalizeFixedTemplates(data.fixed_templates));
+          setPaidStatus(normalizePaidStatus(data.paid_status));
+          setInvestments(normalizeInvestments(data.investments));
         }
         await loadTransactions();
       } catch (err) {
@@ -162,9 +182,9 @@ export default function App() {
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'app_state' }, (payload) => {
         if (payload.new) {
-          setFixedTemplates(payload.new.fixed_templates || DEFAULT_FIXED);
-          setPaidStatus(payload.new.paid_status || {});
-          setInvestments(payload.new.investments || DEFAULT_INVESTMENTS);
+          setFixedTemplates(normalizeFixedTemplates(payload.new.fixed_templates));
+          setPaidStatus(normalizePaidStatus(payload.new.paid_status));
+          setInvestments(normalizeInvestments(payload.new.investments));
         }
       })
       .subscribe();

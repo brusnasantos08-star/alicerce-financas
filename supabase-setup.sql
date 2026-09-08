@@ -40,11 +40,34 @@ on conflict (id) do nothing;
 alter table app_state enable row level security;
 alter table transactions enable row level security;
 
+drop policy if exists "allow all app_state" on app_state;
 create policy "allow all app_state" on app_state for all using (true) with check (true);
+
+drop policy if exists "allow all transactions" on transactions;
 create policy "allow all transactions" on transactions for all using (true) with check (true);
+
+drop policy if exists "public read receipts" on storage.objects;
 create policy "public read receipts" on storage.objects for select using (bucket_id = 'receipts');
+
+drop policy if exists "anon upload receipts" on storage.objects;
 create policy "anon upload receipts" on storage.objects for insert with check (bucket_id = 'receipts');
+
+drop policy if exists "anon delete receipts" on storage.objects;
 create policy "anon delete receipts" on storage.objects for delete using (bucket_id = 'receipts');
 
--- 5) Sincronização em tempo real entre os dois celulares
-alter publication supabase_realtime add table app_state, transactions;
+-- 5) Sincronização em tempo real entre os dois celulares (seguro rodar de novo)
+do $$
+begin
+  if not exists (
+    select 1 from pg_publication_tables
+    where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = 'app_state'
+  ) then
+    alter publication supabase_realtime add table app_state;
+  end if;
+  if not exists (
+    select 1 from pg_publication_tables
+    where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = 'transactions'
+  ) then
+    alter publication supabase_realtime add table transactions;
+  end if;
+end $$;
