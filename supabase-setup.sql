@@ -31,6 +31,26 @@ create table if not exists transactions (
   created_at timestamptz default now()
 );
 
+-- 2b) Separação por espaço: conta conjunta do casal + área pessoal de cada um
+alter table transactions
+  add column if not exists space text not null default 'joint';
+
+do $$
+begin
+  if not exists (select 1 from pg_constraint where conname = 'transactions_space_check') then
+    alter table transactions add constraint transactions_space_check check (space in ('joint', 'p1', 'p2'));
+  end if;
+end $$;
+
+alter table app_state
+  add column if not exists settings jsonb not null default '{"p1Name":"Pessoa 1","p2Name":"Pessoa 2"}'::jsonb;
+
+-- Migra gastos fixos existentes (formato antigo: array simples) para o formato por espaço.
+-- Só roda se ainda estiver no formato antigo — seguro rodar de novo.
+update app_state
+set fixed_templates = jsonb_build_object('joint', coalesce(fixed_templates, '[]'::jsonb), 'p1', '[]'::jsonb, 'p2', '[]'::jsonb)
+where id = 1 and jsonb_typeof(fixed_templates) = 'array';
+
 -- 3) Bucket de armazenamento para os prints dos comprovantes
 insert into storage.buckets (id, name, public)
 values ('receipts', 'receipts', true)
