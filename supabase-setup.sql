@@ -51,6 +51,24 @@ update app_state
 set fixed_templates = jsonb_build_object('joint', coalesce(fixed_templates, '[]'::jsonb), 'p1', '[]'::jsonb, 'p2', '[]'::jsonb)
 where id = 1 and jsonb_typeof(fixed_templates) = 'array';
 
+-- 2c) Categoria nos gastos variáveis (usada no relatório)
+alter table transactions
+  add column if not exists category text not null default 'outro';
+
+-- 2d) Ganhos mensais (salário, extras), também separados por espaço
+create table if not exists income (
+  id uuid primary key default gen_random_uuid(),
+  month_key text not null,
+  space text not null default 'joint' check (space in ('joint', 'p1', 'p2')),
+  description text not null,
+  amount numeric not null,
+  created_at timestamptz default now()
+);
+
+alter table income enable row level security;
+drop policy if exists "allow all income" on income;
+create policy "allow all income" on income for all using (true) with check (true);
+
 -- 3) Bucket de armazenamento para os prints dos comprovantes
 insert into storage.buckets (id, name, public)
 values ('receipts', 'receipts', true)
@@ -89,5 +107,11 @@ begin
     where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = 'transactions'
   ) then
     alter publication supabase_realtime add table transactions;
+  end if;
+  if not exists (
+    select 1 from pg_publication_tables
+    where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = 'income'
+  ) then
+    alter publication supabase_realtime add table income;
   end if;
 end $$;
