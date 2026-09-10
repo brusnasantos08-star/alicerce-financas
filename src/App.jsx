@@ -305,31 +305,53 @@ export default function App() {
   }, [fixedTemplates, paidStatus, investments, settings, loading]);
 
   const mk = monthKey(year, selectedMonthIdx);
-  const currentFixed = fixedTemplates[space] || [];
+  const spaceLabels = { joint: 'Conjunta', p1: settings.p1Name, p2: settings.p2Name };
+  const showOrigin = space === 'joint';
+
+  // Filtra uma lista pelo espaço atual — mas quando o espaço é "joint" (Conjunta),
+  // junta automaticamente o que está em joint + p1 + p2, marcando de qual espaço
+  // cada item veio (pra dar pra editar/excluir o item certo depois).
+  function forSpace(list, tagKey = '_space') {
+    if (space !== 'joint') return list.filter((item) => item.space === space);
+    return list.map((item) => ({ ...item, [tagKey]: item.space }));
+  }
+
+  const currentFixed =
+    space === 'joint'
+      ? SPACES.flatMap((s) => (fixedTemplates[s] || []).map((f) => ({ ...f, _space: s })))
+      : (fixedTemplates[space] || []).map((f) => ({ ...f, _space: space }));
   const fixedTotal = currentFixed.reduce((s, f) => s + (Number(f.amount) || 0), 0);
   const fixedPaidTotal = currentFixed.reduce(
     (s, f) => s + (((paidStatus[mk] || {})[f.id]) ? (Number(f.amount) || 0) : 0),
     0
   );
   const fixedPendingTotal = fixedTotal - fixedPaidTotal;
-  const monthTransactions = (transactions[mk] || []).filter((t) => t.space === space);
+  const monthTransactions = forSpace((transactions[mk] || []).map((t) => ({ ...t, space: t.space || 'joint' })));
   const variableTotal = monthTransactions.reduce((s, t) => s + (Number(t.amount) || 0), 0);
-  const monthIncome = (income[mk] || []).filter((i) => i.space === space);
+  const monthIncome = forSpace((income[mk] || []).map((i) => ({ ...i, space: i.space || 'joint' })));
   const incomeTotal = monthIncome.reduce((s, i) => s + (Number(i.amount) || 0), 0);
   const contribution = (investments.contributions || {})[mk] || 0;
   const leftover = incomeTotal - fixedTotal - variableTotal - contribution;
+  const suggestedContribution = Math.max(0, incomeTotal - fixedTotal - variableTotal);
+
+  // Soma um valor por espaço (usado no relatório): joint = tudo somado, p1/p2 = só o próprio.
+  function sumForSpace(list, amountKey = 'amount') {
+    const filtered = space === 'joint' ? list : list.filter((item) => item.space === space);
+    return filtered.reduce((s, item) => s + (Number(item[amountKey]) || 0), 0);
+  }
 
   // Dados dos últimos 6 meses (espaço atual) pra alimentar os gráficos do relatório.
   const recentMonths = getRecentMonthKeys(year, selectedMonthIdx, 6);
   const trendData = recentMonths.map(({ key, label }) => ({
     label,
-    ganhos: (income[key] || []).filter((i) => i.space === space).reduce((s, i) => s + (Number(i.amount) || 0), 0),
-    variavel: (transactions[key] || []).filter((t) => t.space === space).reduce((s, t) => s + (Number(t.amount) || 0), 0),
+    ganhos: sumForSpace(income[key] || []),
+    variavel: sumForSpace(transactions[key] || []),
     aporte: (investments.contributions || {})[key] || 0,
   }));
   const categoryTotals = {};
   recentMonths.forEach(({ key }) => {
-    (transactions[key] || []).filter((t) => t.space === space).forEach((t) => {
+    const list = space === 'joint' ? (transactions[key] || []) : (transactions[key] || []).filter((t) => t.space === space);
+    list.forEach((t) => {
       const cat = t.category || 'outro';
       categoryTotals[cat] = (categoryTotals[cat] || 0) + (Number(t.amount) || 0);
     });
@@ -340,7 +362,7 @@ export default function App() {
 
   function hasData(idx) {
     const k = monthKey(year, idx);
-    const hasSpaceTx = (transactions[k] || []).some((t) => t.space === space);
+    const hasSpaceTx = (transactions[k] || []).some((t) => space === 'joint' || t.space === space);
     return hasSpaceTx || !!(investments.contributions || {})[k];
   }
 
@@ -421,6 +443,8 @@ export default function App() {
                 onAdd={() => setShowTxModal(true)}
                 onDelete={handleDeleteTransaction}
                 onViewImage={setLightboxImage}
+                spaceLabels={spaceLabels}
+                showOrigin={showOrigin}
               />
             )}
 
@@ -430,6 +454,8 @@ export default function App() {
                 total={incomeTotal}
                 onAdd={() => setShowIncomeModal(true)}
                 onDelete={handleDeleteIncome}
+                spaceLabels={spaceLabels}
+                showOrigin={showOrigin}
               />
             )}
 
@@ -437,6 +463,8 @@ export default function App() {
               <FixedExpensesTab
                 items={currentFixed}
                 paid={paidStatus[mk] || {}}
+                spaceLabels={spaceLabels}
+                showOrigin={showOrigin}
                 onToggle={(id) =>
                   setPaidStatus((prev) => ({
                     ...prev,
@@ -446,7 +474,12 @@ export default function App() {
                 onAdd={() => { setEditingFixed(null); setShowFixedModal(true); }}
                 onEdit={(f) => { setEditingFixed(f); setShowFixedModal(true); }}
                 onDelete={(id) => {
-                  setFixedTemplates((prev) => ({ ...prev, [space]: prev[space].filter((f) => f.id !== id) }));
+                  const target = currentFixed.find((f) => f.id === id);
+                  const targetSpace = target ? target._space : space;
+                  setFixedTemplates((prev) => ({
+                    ...prev,
+                    [targetSpace]: (prev[targetSpace] || []).filter((f) => f.id !== id),
+                  }));
                   setPaidStatus((prev) => {
                     const next = {};
                     Object.keys(prev).forEach((k) => {
@@ -466,6 +499,7 @@ export default function App() {
               <InvestmentsTab
                 investments={investments}
                 contribution={contribution}
+                suggestedContribution={suggestedContribution}
                 monthKeyStr={mk}
                 onSetBalance={(v) => setInvestments((prev) => ({ ...prev, balance: v }))}
                 onSetContribution={(k, v) =>
@@ -516,12 +550,13 @@ export default function App() {
               onClose={() => setShowFixedModal(false)}
               onSave={(data) => {
                 if (editingFixed) {
+                  const targetSpace = editingFixed._space || space;
                   setFixedTemplates((prev) => ({
                     ...prev,
-                    [space]: prev[space].map((f) => (f.id === editingFixed.id ? { ...f, ...data } : f)),
+                    [targetSpace]: (prev[targetSpace] || []).map((f) => (f.id === editingFixed.id ? { ...f, ...data } : f)),
                   }));
                 } else {
-                  setFixedTemplates((prev) => ({ ...prev, [space]: [...prev[space], { ...data, id: uid() }] }));
+                  setFixedTemplates((prev) => ({ ...prev, [space]: [...(prev[space] || []), { ...data, id: uid() }] }));
                 }
                 setShowFixedModal(false);
               }}
@@ -932,7 +967,7 @@ function TransactionModal({ onClose, onSave }) {
   );
 }
 
-function TransactionsTab({ items, total, onAdd, onDelete, onViewImage }) {
+function TransactionsTab({ items, total, onAdd, onDelete, onViewImage, spaceLabels, showOrigin }) {
   return (
     <div className="space-y-6">
       <div className="flex flex-col gap-3 rounded-xl border border-rose-100 bg-rose-50 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
@@ -965,6 +1000,7 @@ function TransactionsTab({ items, total, onAdd, onDelete, onViewImage }) {
                 <p className="truncate text-sm font-medium text-slate-800">{t.description}</p>
                 <p className="text-xs text-slate-400">
                   {new Date(t.date + 'T00:00:00').toLocaleDateString('pt-BR')} · {(CATEGORY_MAP[t.category] || CATEGORY_MAP.outro).label}
+                  {showOrigin && ` · ${spaceLabels[t.space] || spaceLabels.joint}`}
                 </p>
               </div>
               <p className="tabular-nums shrink-0 font-medium text-rose-600">{brl(t.amount)}</p>
@@ -983,7 +1019,7 @@ function TransactionsTab({ items, total, onAdd, onDelete, onViewImage }) {
   );
 }
 
-function IncomeTab({ items, total, onAdd, onDelete }) {
+function IncomeTab({ items, total, onAdd, onDelete, spaceLabels, showOrigin }) {
   return (
     <div className="space-y-6">
       <div className="flex flex-col gap-3 rounded-xl border border-emerald-100 bg-emerald-50 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
@@ -1014,6 +1050,7 @@ function IncomeTab({ items, total, onAdd, onDelete }) {
               </span>
               <div className="min-w-0 flex-1">
                 <p className="truncate text-sm font-medium text-slate-800">{i.description}</p>
+                {showOrigin && <p className="text-xs text-slate-400">{spaceLabels[i.space] || spaceLabels.joint}</p>}
               </div>
               <p className="tabular-nums shrink-0 font-medium text-emerald-600">{brl(i.amount)}</p>
               <button
@@ -1099,7 +1136,7 @@ function ImageLightbox({ src, onClose }) {
   );
 }
 
-function FixedExpensesTab({ items, paid, onToggle, onAdd, onEdit, onDelete, total, paidTotal, pendingTotal }) {
+function FixedExpensesTab({ items, paid, onToggle, onAdd, onEdit, onDelete, total, paidTotal, pendingTotal, spaceLabels, showOrigin }) {
   const pct = total > 0 ? Math.round((paidTotal / total) * 100) : 0;
   return (
     <div className="space-y-6">
@@ -1140,7 +1177,9 @@ function FixedExpensesTab({ items, paid, onToggle, onAdd, onEdit, onDelete, tota
               </span>
               <div className="min-w-0 flex-1">
                 <p className="truncate text-sm font-medium text-slate-800">{f.name}</p>
-                <p className="tabular-nums text-xs text-slate-400">{brl(f.amount)}</p>
+                <p className="tabular-nums text-xs text-slate-400">
+                  {brl(f.amount)}{showOrigin && ` · ${spaceLabels[f._space] || spaceLabels.joint}`}
+                </p>
               </div>
               <button onClick={() => onEdit(f)} aria-label={`Editar ${f.name}`} className="rounded-full p-1.5 text-slate-300 hover:bg-slate-100 hover:text-slate-600">
                 <Pencil className="h-4 w-4" />
@@ -1296,7 +1335,7 @@ function BrickProgress({ pct }) {
   );
 }
 
-function InvestmentsTab({ investments, contribution, monthKeyStr, onSetBalance, onSetContribution, onSetGoal }) {
+function InvestmentsTab({ investments, contribution, suggestedContribution, monthKeyStr, onSetBalance, onSetContribution, onSetGoal }) {
   const [editingGoal, setEditingGoal] = useState(false);
   const [goalNameDraft, setGoalNameDraft] = useState(investments.goalName);
   const [goalAmountDraft, setGoalAmountDraft] = useState(String(investments.goalAmount));
@@ -1370,6 +1409,20 @@ function InvestmentsTab({ investments, contribution, monthKeyStr, onSetBalance, 
             onChange={(v) => onSetContribution(monthKeyStr, v)}
             color="text-emerald-700"
           />
+          {suggestedContribution > 0 && (
+            <div className="mt-3 flex items-center justify-between gap-2 rounded-lg bg-slate-50 px-3 py-2">
+              <p className="text-xs text-slate-500">
+                sugestão: <span className="tabular-nums font-medium text-slate-700">{brl(suggestedContribution)}</span>
+                <br />com base no que já foi lançado este mês
+              </p>
+              <button
+                onClick={() => onSetContribution(monthKeyStr, suggestedContribution)}
+                className="shrink-0 rounded-full border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-100"
+              >
+                Usar
+              </button>
+            </div>
+          )}
         </div>
       </div>
     </div>
