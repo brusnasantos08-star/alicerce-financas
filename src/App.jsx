@@ -3,7 +3,11 @@ import {
   Upload, X, Plus, Check, Trash2, Pencil, AlertCircle, Loader2, Settings,
   Home, Building2, Zap, Wifi, UtensilsCrossed, Tv, Car, Heart,
   Dumbbell, GraduationCap, Smartphone, ShoppingCart, Landmark, Wallet,
+  BarChart3, Banknote, Bus, Sparkles, ShoppingBag,
 } from 'lucide-react';
+import {
+  BarChart, Bar, PieChart, Pie, Cell, XAxis, YAxis, Tooltip, ResponsiveContainer, Legend,
+} from 'recharts';
 import { supabase } from './supabaseClient';
 
 const MONTHS = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez'];
@@ -17,6 +21,19 @@ const ICON_LIBRARY = {
   Dumbbell, GraduationCap, Smartphone, ShoppingCart, Landmark, Wallet,
 };
 const ICON_KEYS = Object.keys(ICON_LIBRARY);
+
+// Categorias dos gastos variáveis — usadas no comprovante e no relatório.
+const CATEGORIES = [
+  { id: 'alimentacao', label: 'Alimentação', icon: UtensilsCrossed },
+  { id: 'lazer', label: 'Lazer', icon: Sparkles },
+  { id: 'transporte', label: 'Transporte', icon: Bus },
+  { id: 'saude', label: 'Saúde', icon: Heart },
+  { id: 'compras', label: 'Compras', icon: ShoppingBag },
+  { id: 'imprevisto', label: 'Imprevisto', icon: AlertCircle },
+  { id: 'outro', label: 'Outro', icon: Wallet },
+];
+const CATEGORY_MAP = Object.fromEntries(CATEGORIES.map((c) => [c.id, c]));
+const CHART_COLORS = ['#10b981', '#f43f5e', '#f59e0b', '#0ea5e9', '#8b5cf6', '#f97316', '#64748b'];
 
 // Espaços disponíveis: conta conjunta do casal + uma área pessoal para cada pessoa
 const SPACES = ['joint', 'p1', 'p2'];
@@ -42,6 +59,16 @@ function brl(v) {
 }
 function monthKey(year, idx) {
   return `${year}-${String(idx + 1).padStart(2, '0')}`;
+}
+// Gera as chaves dos últimos `count` meses terminando no mês/ano de referência
+// (lida com virada de ano automaticamente, já que Date normaliza mês negativo).
+function getRecentMonthKeys(refYear, refMonthIdx, count) {
+  const out = [];
+  for (let i = count - 1; i >= 0; i--) {
+    const d = new Date(refYear, refMonthIdx - i, 1);
+    out.push({ key: monthKey(d.getFullYear(), d.getMonth()), label: MONTHS[d.getMonth()] });
+  }
+  return out;
 }
 function uid() {
   return Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
@@ -143,13 +170,16 @@ export default function App() {
   const [fixedTemplates, setFixedTemplates] = useState(DEFAULT_FIXED_TEMPLATES);
   const [paidStatus, setPaidStatus] = useState({});
   const [transactions, setTransactions] = useState({});
+  const [income, setIncome] = useState({});
   const [investments, setInvestments] = useState(DEFAULT_INVESTMENTS);
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
 
   const [showSummary, setShowSummary] = useState(false);
   const [showTxModal, setShowTxModal] = useState(false);
+  const [showIncomeModal, setShowIncomeModal] = useState(false);
   const [showFixedModal, setShowFixedModal] = useState(false);
   const [showNamesModal, setShowNamesModal] = useState(false);
+  const [showReport, setShowReport] = useState(false);
   const [editingFixed, setEditingFixed] = useState(null);
   const [lightboxImage, setLightboxImage] = useState(null);
 
@@ -168,10 +198,24 @@ export default function App() {
       grouped[t.month_key] = grouped[t.month_key] || [];
       grouped[t.month_key].push({
         id: t.id, amount: Number(t.amount), description: t.description, date: t.date, image: t.image_url,
-        space: t.space || 'joint',
+        space: t.space || 'joint', category: t.category || 'outro',
       });
     });
     setTransactions(grouped);
+  }
+
+  async function loadIncome() {
+    if (!supabase) return;
+    const { data, error } = await supabase.from('income').select('*').order('created_at', { ascending: false });
+    if (error) { setSaveError('Não foi possível carregar os ganhos.'); return; }
+    const grouped = {};
+    (data || []).forEach((i) => {
+      grouped[i.month_key] = grouped[i.month_key] || [];
+      grouped[i.month_key].push({
+        id: i.id, amount: Number(i.amount), description: i.description, space: i.space || 'joint',
+      });
+    });
+    setIncome(grouped);
   }
 
   // Carrega os dados do Supabase ao abrir o app
@@ -202,6 +246,7 @@ export default function App() {
           setSettings(normalizeSettings(data.settings));
         }
         await loadTransactions();
+        await loadIncome();
       } catch (err) {
         if (!cancelled) setSaveError('Não foi possível conectar ao Supabase. Confira as chaves no arquivo .env.');
       } finally {
@@ -218,6 +263,9 @@ export default function App() {
       .channel('alicerce-sync')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'transactions' }, () => {
         loadTransactions();
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'income' }, () => {
+        loadIncome();
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'app_state' }, (payload) => {
         if (payload.new) {
@@ -266,7 +314,29 @@ export default function App() {
   const fixedPendingTotal = fixedTotal - fixedPaidTotal;
   const monthTransactions = (transactions[mk] || []).filter((t) => t.space === space);
   const variableTotal = monthTransactions.reduce((s, t) => s + (Number(t.amount) || 0), 0);
+  const monthIncome = (income[mk] || []).filter((i) => i.space === space);
+  const incomeTotal = monthIncome.reduce((s, i) => s + (Number(i.amount) || 0), 0);
   const contribution = (investments.contributions || {})[mk] || 0;
+  const leftover = incomeTotal - fixedTotal - variableTotal - contribution;
+
+  // Dados dos últimos 6 meses (espaço atual) pra alimentar os gráficos do relatório.
+  const recentMonths = getRecentMonthKeys(year, selectedMonthIdx, 6);
+  const trendData = recentMonths.map(({ key, label }) => ({
+    label,
+    ganhos: (income[key] || []).filter((i) => i.space === space).reduce((s, i) => s + (Number(i.amount) || 0), 0),
+    variavel: (transactions[key] || []).filter((t) => t.space === space).reduce((s, t) => s + (Number(t.amount) || 0), 0),
+    aporte: (investments.contributions || {})[key] || 0,
+  }));
+  const categoryTotals = {};
+  recentMonths.forEach(({ key }) => {
+    (transactions[key] || []).filter((t) => t.space === space).forEach((t) => {
+      const cat = t.category || 'outro';
+      categoryTotals[cat] = (categoryTotals[cat] || 0) + (Number(t.amount) || 0);
+    });
+  });
+  const categoryData = Object.entries(categoryTotals)
+    .map(([id, value]) => ({ id, name: (CATEGORY_MAP[id] || CATEGORY_MAP.outro).label, value }))
+    .sort((a, b) => b.value - a.value);
 
   function hasData(idx) {
     const k = monthKey(year, idx);
@@ -284,7 +354,8 @@ export default function App() {
       imageUrl = urlData.publicUrl;
     }
     const { error } = await supabase.from('transactions').insert({
-      month_key: mk, amount: tx.amount, description: tx.description, date: tx.date, image_url: imageUrl, space,
+      month_key: mk, amount: tx.amount, description: tx.description, date: tx.date, image_url: imageUrl,
+      space, category: tx.category || 'outro',
     });
     if (error) { setSaveError('Não foi possível salvar o lançamento.'); return; }
     setShowTxModal(false);
@@ -297,6 +368,21 @@ export default function App() {
     loadTransactions();
   }
 
+  async function handleAddIncome(entry) {
+    const { error } = await supabase.from('income').insert({
+      month_key: mk, amount: entry.amount, description: entry.description, space,
+    });
+    if (error) { setSaveError('Não foi possível salvar o ganho.'); return; }
+    setShowIncomeModal(false);
+    loadIncome();
+  }
+
+  async function handleDeleteIncome(id) {
+    const { error } = await supabase.from('income').delete().eq('id', id);
+    if (error) { setSaveError('Não foi possível excluir o ganho.'); return; }
+    loadIncome();
+  }
+
   if (!supabase) return <ConfigMissingScreen />;
 
   return (
@@ -305,7 +391,7 @@ export default function App() {
         <LoadingScreen />
       ) : (
         <>
-          <Header balance={investments.balance} />
+          <Header balance={investments.balance} onOpenReport={() => setShowReport(true)} />
 
           <SpaceSwitcher
             space={space}
@@ -335,6 +421,15 @@ export default function App() {
                 onAdd={() => setShowTxModal(true)}
                 onDelete={handleDeleteTransaction}
                 onViewImage={setLightboxImage}
+              />
+            )}
+
+            {activeTab === 'ganhos' && (
+              <IncomeTab
+                items={monthIncome}
+                total={incomeTotal}
+                onAdd={() => setShowIncomeModal(true)}
+                onDelete={handleDeleteIncome}
               />
             )}
 
@@ -386,14 +481,34 @@ export default function App() {
           {showSummary && (
             <SummaryDrawer
               monthLabel={MONTHS_FULL[selectedMonthIdx]}
+              incomeTotal={incomeTotal}
               fixedTotal={fixedTotal}
               variableTotal={variableTotal}
               contribution={contribution}
+              leftover={leftover}
               onClose={() => setShowSummary(false)}
             />
           )}
 
           {showTxModal && <TransactionModal onClose={() => setShowTxModal(false)} onSave={handleAddTransaction} />}
+
+          {showIncomeModal && (
+            <IncomeModal onClose={() => setShowIncomeModal(false)} onSave={handleAddIncome} />
+          )}
+
+          {showReport && (
+            <ReportModal
+              onClose={() => setShowReport(false)}
+              trendData={trendData}
+              categoryData={categoryData}
+              leftover={leftover}
+              incomeTotal={incomeTotal}
+              fixedTotal={fixedTotal}
+              variableTotal={variableTotal}
+              contribution={contribution}
+              monthLabel={MONTHS_FULL[selectedMonthIdx]}
+            />
+          )}
 
           {showFixedModal && (
             <FixedExpenseModal
@@ -455,7 +570,7 @@ function LoadingScreen() {
   );
 }
 
-function Header({ balance }) {
+function Header({ balance, onOpenReport }) {
   return (
     <header className="border-b border-slate-200 bg-white">
       <div className="mx-auto flex max-w-3xl items-center justify-between px-4 py-5 sm:px-6">
@@ -463,9 +578,18 @@ function Header({ balance }) {
           <h1 className="font-display text-2xl font-semibold text-slate-900">Alicerce</h1>
           <p className="text-sm text-slate-500">seu progresso financeiro, mês a mês</p>
         </div>
-        <div className="text-right">
-          <p className="text-sm text-slate-500">reserva atual</p>
-          <p className="font-display text-xl font-semibold text-amber-700">{brl(balance)}</p>
+        <div className="flex items-center gap-3">
+          <div className="text-right">
+            <p className="text-sm text-slate-500">reserva atual</p>
+            <p className="font-display text-xl font-semibold text-amber-700">{brl(balance)}</p>
+          </div>
+          <button
+            onClick={onOpenReport}
+            aria-label="Ver relatório"
+            className="shrink-0 rounded-full border border-slate-200 p-2.5 text-slate-500 hover:bg-slate-100 hover:text-slate-700"
+          >
+            <BarChart3 className="h-5 w-5" />
+          </button>
         </div>
       </div>
     </header>
@@ -577,6 +701,7 @@ function MonthStrip({ selectedIdx, onSelect, hasData }) {
 function TabBar({ active, onChange }) {
   const tabs = [
     { id: 'lancamentos', label: 'Lançamentos' },
+    { id: 'ganhos', label: 'Ganhos' },
     { id: 'fixos', label: 'Gastos fixos' },
     { id: 'investimentos', label: 'Investimentos' },
   ];
@@ -622,6 +747,7 @@ function Modal({ title, onClose, children, wide }) {
 function TransactionModal({ onClose, onSave }) {
   const [amount, setAmount] = useState('');
   const [description, setDescription] = useState('');
+  const [category, setCategory] = useState('outro');
   const [date, setDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [file, setFile] = useState(null);
   const [previewUrl, setPreviewUrl] = useState(null);
@@ -697,7 +823,7 @@ function TransactionModal({ onClose, onSave }) {
     if (!amount || isNaN(numAmount) || numAmount <= 0) newErrors.amount = 'Informe um valor válido.';
     if (Object.keys(newErrors).length) { setErrors(newErrors); return; }
     setSaving(true);
-    await onSave({ amount: numAmount, description: description.trim(), date }, file);
+    await onSave({ amount: numAmount, description: description.trim(), date, category }, file);
     setSaving(false);
   }
 
@@ -747,6 +873,28 @@ function TransactionModal({ onClose, onSave }) {
           </div>
           {detectNote && <p className="mt-1 text-xs text-slate-500">{detectNote}</p>}
           {errors.amount && <p className="mt-1 text-sm text-rose-600">{errors.amount}</p>}
+        </div>
+
+        <div>
+          <label className="mb-1.5 block text-sm text-slate-600">Categoria</label>
+          <div className="flex flex-wrap gap-2">
+            {CATEGORIES.map((c) => {
+              const Icon = c.icon;
+              const active = category === c.id;
+              return (
+                <button
+                  key={c.id}
+                  onClick={() => setCategory(c.id)}
+                  className={`flex items-center gap-1.5 rounded-full border-2 px-3 py-1.5 text-sm ${
+                    active ? 'border-slate-900 bg-slate-900 text-white' : 'border-slate-200 text-slate-500 hover:border-slate-400'
+                  }`}
+                >
+                  <Icon className="h-3.5 w-3.5" />
+                  {c.label}
+                </button>
+              );
+            })}
+          </div>
         </div>
 
         <div>
@@ -815,7 +963,9 @@ function TransactionsTab({ items, total, onAdd, onDelete, onViewImage }) {
               </button>
               <div className="min-w-0 flex-1">
                 <p className="truncate text-sm font-medium text-slate-800">{t.description}</p>
-                <p className="text-xs text-slate-400">{new Date(t.date + 'T00:00:00').toLocaleDateString('pt-BR')}</p>
+                <p className="text-xs text-slate-400">
+                  {new Date(t.date + 'T00:00:00').toLocaleDateString('pt-BR')} · {(CATEGORY_MAP[t.category] || CATEGORY_MAP.outro).label}
+                </p>
               </div>
               <p className="tabular-nums shrink-0 font-medium text-rose-600">{brl(t.amount)}</p>
               <button
@@ -830,6 +980,111 @@ function TransactionsTab({ items, total, onAdd, onDelete, onViewImage }) {
         </ul>
       )}
     </div>
+  );
+}
+
+function IncomeTab({ items, total, onAdd, onDelete }) {
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-col gap-3 rounded-xl border border-emerald-100 bg-emerald-50 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <p className="text-sm text-emerald-700">total de ganhos do mês</p>
+          <p className="font-display tabular-nums text-2xl font-semibold text-emerald-700">{brl(total)}</p>
+        </div>
+        <button
+          onClick={onAdd}
+          className="flex items-center justify-center gap-2 rounded-full bg-emerald-600 px-4 py-2.5 text-sm font-medium text-white shadow-sm hover:bg-emerald-700"
+        >
+          <Plus className="h-4 w-4" />
+          Novo ganho
+        </button>
+      </div>
+
+      {items.length === 0 ? (
+        <div className="rounded-xl border border-dashed border-slate-300 py-10 text-center text-slate-500">
+          <p>Nenhum ganho registrado neste mês ainda.</p>
+          <p className="text-sm">Lance aqui o salário e qualquer extra (bônus, freela, 13º...).</p>
+        </div>
+      ) : (
+        <ul className="divide-y divide-slate-200 rounded-xl border border-slate-200 bg-white">
+          {items.map((i) => (
+            <li key={i.id} className="flex items-center gap-3 px-4 py-3">
+              <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-emerald-100 text-emerald-700">
+                <Banknote className="h-5 w-5" />
+              </span>
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-sm font-medium text-slate-800">{i.description}</p>
+              </div>
+              <p className="tabular-nums shrink-0 font-medium text-emerald-600">{brl(i.amount)}</p>
+              <button
+                onClick={() => onDelete(i.id)}
+                aria-label="Excluir ganho"
+                className="shrink-0 rounded-full p-1.5 text-slate-300 hover:bg-slate-100 hover:text-rose-500"
+              >
+                <Trash2 className="h-4 w-4" />
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function IncomeModal({ onClose, onSave }) {
+  const [amount, setAmount] = useState('');
+  const [description, setDescription] = useState('');
+  const [errors, setErrors] = useState({});
+  const [saving, setSaving] = useState(false);
+
+  async function handleSubmit() {
+    const newErrors = {};
+    if (!description.trim()) newErrors.description = 'Dê um nome pra esse ganho (ex: Salário).';
+    const numAmount = parseAmount(amount);
+    if (!amount || isNaN(numAmount) || numAmount <= 0) newErrors.amount = 'Informe um valor válido.';
+    if (Object.keys(newErrors).length) { setErrors(newErrors); return; }
+    setSaving(true);
+    await onSave({ amount: numAmount, description: description.trim() });
+    setSaving(false);
+  }
+
+  return (
+    <Modal title="Novo ganho" onClose={onClose}>
+      <div className="space-y-4">
+        <div>
+          <label className="mb-1.5 block text-sm text-slate-600">Descrição</label>
+          <input
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+            placeholder="Ex: Salário, 13º, Freela..."
+            className="w-full rounded-lg border border-slate-300 px-3 py-2 outline-none focus:border-slate-500"
+          />
+          {errors.description && <p className="mt-1 text-sm text-rose-600">{errors.description}</p>}
+        </div>
+        <div>
+          <label className="mb-1.5 block text-sm text-slate-600">Valor</label>
+          <div className="flex items-center rounded-lg border border-slate-300 px-3 focus-within:border-slate-500">
+            <span className="text-slate-400">R$</span>
+            <input
+              inputMode="decimal"
+              value={amount}
+              onChange={(e) => setAmount(e.target.value)}
+              placeholder="0,00"
+              className="tabular-nums w-full bg-transparent px-2 py-2 outline-none"
+            />
+          </div>
+          {errors.amount && <p className="mt-1 text-sm text-rose-600">{errors.amount}</p>}
+        </div>
+        <div className="flex gap-3 pt-2">
+          <button onClick={onClose} disabled={saving} className="flex-1 rounded-lg border border-slate-300 py-2.5 text-sm font-medium text-slate-600 hover:bg-slate-50 disabled:opacity-50">
+            Cancelar
+          </button>
+          <button onClick={handleSubmit} disabled={saving} className="flex-1 rounded-lg bg-emerald-600 py-2.5 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-50">
+            {saving ? 'Salvando...' : 'Salvar ganho'}
+          </button>
+        </div>
+      </div>
+    </Modal>
   );
 }
 
@@ -1133,7 +1388,7 @@ function SummaryRow({ label, value, textClass, colorClass }) {
   );
 }
 
-function SummaryDrawer({ monthLabel, fixedTotal, variableTotal, contribution, onClose }) {
+function SummaryDrawer({ monthLabel, incomeTotal, fixedTotal, variableTotal, contribution, leftover, onClose }) {
   const sum = fixedTotal + variableTotal + contribution || 1;
   return (
     <div className="fixed inset-0 z-50 flex justify-end bg-black bg-opacity-50" onClick={onClose}>
@@ -1145,7 +1400,16 @@ function SummaryDrawer({ monthLabel, fixedTotal, variableTotal, contribution, on
           </button>
         </div>
 
+        <div className="mb-6 rounded-xl bg-slate-50 p-4">
+          <p className="text-sm text-slate-500">sobra do mês</p>
+          <p className={`font-display tabular-nums text-2xl font-semibold ${leftover >= 0 ? 'text-emerald-700' : 'text-rose-600'}`}>
+            {brl(leftover)}
+          </p>
+          <p className="mt-1 text-xs text-slate-400">ganhos − gastos fixos − variáveis − aporte</p>
+        </div>
+
         <div className="space-y-4">
+          <SummaryRow label="ganhos" value={incomeTotal} colorClass="bg-emerald-500" textClass="text-emerald-600" />
           <SummaryRow label="gastos fixos" value={fixedTotal} colorClass="bg-slate-700" textClass="text-slate-700" />
           <SummaryRow label="gastos variáveis" value={variableTotal} colorClass="bg-rose-500" textClass="text-rose-600" />
           <SummaryRow label="investido no mês" value={contribution} colorClass="bg-amber-500" textClass="text-amber-700" />
@@ -1158,6 +1422,74 @@ function SummaryDrawer({ monthLabel, fixedTotal, variableTotal, contribution, on
         </div>
       </div>
     </div>
+  );
+}
+
+function ReportModal({ onClose, trendData, categoryData, leftover, incomeTotal, fixedTotal, variableTotal, contribution, monthLabel }) {
+  const hasCategoryData = categoryData.some((c) => c.value > 0);
+  return (
+    <Modal title="Relatório" onClose={onClose} wide>
+      <div className="space-y-6">
+        <div className="rounded-xl bg-slate-50 p-4">
+          <p className="text-sm text-slate-500">sobra em {monthLabel}</p>
+          <p className={`font-display tabular-nums text-2xl font-semibold ${leftover >= 0 ? 'text-emerald-700' : 'text-rose-600'}`}>
+            {brl(leftover)}
+          </p>
+          <div className="mt-3 grid grid-cols-2 gap-2 text-xs sm:grid-cols-4">
+            <p className="text-emerald-600">ganhos: <span className="tabular-nums font-medium">{brl(incomeTotal)}</span></p>
+            <p className="text-slate-600">fixos: <span className="tabular-nums font-medium">{brl(fixedTotal)}</span></p>
+            <p className="text-rose-600">variáveis: <span className="tabular-nums font-medium">{brl(variableTotal)}</span></p>
+            <p className="text-amber-700">aporte: <span className="tabular-nums font-medium">{brl(contribution)}</span></p>
+          </div>
+        </div>
+
+        <div>
+          <h4 className="mb-3 text-sm font-medium text-slate-600">últimos 6 meses</h4>
+          <div style={{ width: '100%', height: 220 }}>
+            <ResponsiveContainer>
+              <BarChart data={trendData} margin={{ top: 4, right: 4, left: -20, bottom: 0 }}>
+                <XAxis dataKey="label" tick={{ fontSize: 12, fill: '#64748b' }} axisLine={false} tickLine={false} />
+                <YAxis tick={{ fontSize: 11, fill: '#94a3b8' }} axisLine={false} tickLine={false} width={48} />
+                <Tooltip
+                  formatter={(value) => brl(value)}
+                  contentStyle={{ fontSize: 12, borderRadius: 8, border: '1px solid #e2e8f0' }}
+                />
+                <Legend wrapperStyle={{ fontSize: 12 }} />
+                <Bar dataKey="ganhos" name="ganhos" fill="#10b981" radius={[4, 4, 0, 0]} />
+                <Bar dataKey="variavel" name="variáveis" fill="#f43f5e" radius={[4, 4, 0, 0]} />
+                <Bar dataKey="aporte" name="aporte" fill="#f59e0b" radius={[4, 4, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+          <p className="mt-1 text-xs text-slate-400">
+            gastos fixos não entram aqui porque refletem a lista atual, não um histórico mês a mês
+          </p>
+        </div>
+
+        <div>
+          <h4 className="mb-3 text-sm font-medium text-slate-600">gastos variáveis por categoria (últimos 6 meses)</h4>
+          {hasCategoryData ? (
+            <div style={{ width: '100%', height: 220 }}>
+              <ResponsiveContainer>
+                <PieChart>
+                  <Pie data={categoryData} dataKey="value" nameKey="name" innerRadius={45} outerRadius={80} paddingAngle={2}>
+                    {categoryData.map((entry, idx) => (
+                      <Cell key={entry.id} fill={CHART_COLORS[idx % CHART_COLORS.length]} />
+                    ))}
+                  </Pie>
+                  <Tooltip formatter={(value) => brl(value)} contentStyle={{ fontSize: 12, borderRadius: 8, border: '1px solid #e2e8f0' }} />
+                  <Legend wrapperStyle={{ fontSize: 12 }} />
+                </PieChart>
+              </ResponsiveContainer>
+            </div>
+          ) : (
+            <p className="rounded-xl border border-dashed border-slate-300 py-8 text-center text-sm text-slate-400">
+              Ainda não há comprovantes com categoria nos últimos 6 meses.
+            </p>
+          )}
+        </div>
+      </div>
+    </Modal>
   );
 }
 
